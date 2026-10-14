@@ -1,1 +1,125 @@
-
+{
+  "version": 1,
+  "author": "ALESSANDRO VIRIVÈ",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-arduino-uno",
+      "id": "uno",
+      "top": -116.2,
+      "left": -100.6,
+      "rotate": 180,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-membrane-keypad",
+      "id": "keypad1",
+      "top": 449.2,
+      "left": -38.1,
+      "attrs": { "columns": "3" }
+    },
+    {
+      "type": "wokwi-7segment",
+      "id": "sevseg1",
+      "top": 313.02,
+      "left": -114.08,
+      "attrs": { "digits": "4" }
+    },
+    {
+      "type": "wokwi-7segment",
+      "id": "sevseg2",
+      "top": 313.02,
+      "left": 77.36,
+      "attrs": { "digits": "2" }
+    },
+    {
+      "type": "wokwi-pir-motion-sensor",
+      "id": "pir1",
+      "top": 288,
+      "left": 204.38,
+      "rotate": 180,
+      "attrs": {}
+    },
+    { "type": "wokwi-74hc595", "id": "sr1", "top": 200.4, "left": -4.16, "attrs": {} }
+  ],
+  "connections": [
+    [ "keypad1:R1", "uno:A0", "orange", [ "v19.2", "h-220.8", "v-921.6", "h147.8" ] ],
+    [ "keypad1:R3", "uno:A2", "orange", [ "v19.2", "h-240.05", "v-921.6", "h128.8" ] ],
+    [ "keypad1:R4", "uno:A3", "orange", [ "v19.2", "h-249.55", "v-921.6", "h119.3" ] ],
+    [ "keypad1:C1", "uno:A4", "purple", [ "v19.2", "h-249.7", "v-921.6", "h100.2" ] ],
+    [ "keypad1:C2", "uno:A5", "purple", [ "v19.2", "h-259.2", "v-921.6", "h90.7" ] ],
+    [ "pir1:GND", "uno:GND.1", "black", [ "v-192", "h-181.84" ] ],
+    [ "pir1:VCC", "uno:5V", "red", [ "v-403.2", "h-245.8" ] ],
+    [ "pir1:OUT", "uno:2", "cyan", [ "h0.14", "v-182.4", "h-312.7" ] ],
+    [ "sevseg1:DIG1", "uno:8", "green", [ "v-9.6", "h-76.79", "v-220.8", "h125.2" ] ],
+    [ "sevseg1:DIG2", "uno:9", "limegreen", [ "v-9.6", "h-105.6", "v-220.8", "h135.2" ] ],
+    [ "sevseg1:DIG3", "uno:10", "green", [ "v-9.6", "h-115.2", "v-220.8", "h144.7" ] ],
+    [ "sevseg1:DIG4", "uno:11", "limegreen", [ "v8.76", "h-124.8", "v-307.2", "h154.2" ] ],
+    [ "keypad1:C3", "uno:3", "purple", [ "v19.2", "h-268.7", "v-700.8", "h119.2" ] ],
+    [ "sevseg2:DIG1", "uno:12", "green", [ "v-9.6", "h-249.6", "v-220.8", "h163.7" ] ],
+    [ "sevseg2:DIG2", "uno:13", "limegreen", [ "v-9.6", "h-259.2", "v-220.8", "h173.2" ] ],
+    [ "keypad1:R2", "uno:A1", "orange", [ "v19.2", "h-230.3", "v-921.6", "h138.3" ] ],
+    [ "uno:5V", "sr1:VCC", "red", [ "v-9.5", "h245.8", "v297.6", "h-259.2" ] ],
+    [ "uno:GND.1", "sr1:GND", "black", [ "v19.2", "h18.9", "v144", "h-9.6" ] ],
+    [ "sr1:MR", "uno:5V", "red", [ "v-18", "h201.6", "v-297.6", "h-245.8" ] ],
+    [ "sevseg1:A", "sr1:Q0", "orange", [ "v-124.8", "h48" ] ],
+    [ "sevseg1:B", "sr1:Q1", "orange", [ "v-28.8", "h-38.4", "v-48", "h38.4" ] ],
+    [ "sr1:OE", "uno:GND.1", "black", [ "v-8.4", "h48", "v-96", "h-18.9" ] ],
+    [ "uno:4", "sr1:DS", "magenta", [ "v19.2", "h63.3" ] ],
+    [ "uno:5", "sr1:SHCP", "purple", [ "v19.2", "h82.6" ] ],
+    [ "uno:6", "sr1:STCP", "white", [ "v19.2", "h63.5" ] ],
+    [
+      "sevseg1:C",
+      "sr1:Q2",
+      "orange",
+      [ "v18.36", "h201.6", "v-115.2", "h-220.8", "v-48", "h48" ]
+    ],
+    [
+      "sevseg1:D",
+      "sr1:Q3",
+      "orange",
+      [ "v18.36", "h220.8", "v-115.2", "h-220.8", "v-48", "h57.6" ]
+    ],
+    [
+      "sevseg1:E",
+      "sr1:Q4",
+      "orange",
+      [ "v18.36", "h230.41", "v-115.2", "h-220.8", "v-48", "h67.2" ]
+    ],
+    [ "sevseg1:F", "sr1:Q5", "orange", [ "v-28.8", "h-9.6", "v-48", "h76.8" ] ],
+    [ "sevseg2:A", "sr1:Q0", "gold", [ "v-28.8", "h-144", "v-105.6", "h48" ] ],
+    [ "sevseg2:B", "sr1:Q1", "gold", [ "v-28.8", "h-153.6", "v-38.4", "h38.4" ] ],
+    [
+      "sevseg2:C",
+      "sr1:Q2",
+      "gold",
+      [ "v18.36", "h76.8", "v-115.2", "h-220.8", "v-38.4", "h48" ]
+    ],
+    [
+      "sevseg2:D",
+      "sr1:Q3",
+      "gold",
+      [ "v18.36", "h48", "v-115.2", "h-220.8", "v-38.4", "h57.6" ]
+    ],
+    [
+      "sevseg2:E",
+      "sr1:Q4",
+      "gold",
+      [ "v18.36", "h57.6", "v-115.2", "h-220.8", "v-38.4", "h67.2" ]
+    ],
+    [ "sevseg2:F", "sr1:Q5", "gold", [ "v-28.8", "h-182.4", "v-38.4", "h76.8" ] ],
+    [
+      "sevseg1:G",
+      "sr1:Q6",
+      "orange",
+      [ "v18.36", "h192", "v-115.2", "h-220.8", "v-48", "h86.4" ]
+    ],
+    [
+      "sevseg2:G",
+      "sr1:Q6",
+      "gold",
+      [ "v18.36", "h38.4", "v-115.2", "h-220.8", "v-38.4", "h86.4" ]
+    ]
+  ],
+  "dependencies": {}
+}
