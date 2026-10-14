@@ -68,7 +68,7 @@ The firmware is organized into 6 clean layers siguiendo il pattern **Model-View-
 ## Running the Project
 
 ### Run on Wokwi
-1. Open the simulation on [Wokwi](<INSERT_YOUR_WOKWI_PROJECT_LINK_HERE>).
+1. Open the simulation on [Wokwi](<(https://wokwi.com/projects/467806361810704385)>).
 2. Click **Start Simulation**.
 3. Trigger the **PIR Motion Sensor** to wake up the display (`------`).
 4. Press `*`, then type `123456`.
