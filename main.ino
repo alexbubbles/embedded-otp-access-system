@@ -1,316 +1,428 @@
-// ==============================================================================
-// 1. MODEL: DATI, STATO DEL SISTEMA E ROM
-// ==============================================================================
 
-// [COSTANTI DI STATO]
-const unsigned char ST_STANDBY   = 0;
-const unsigned char ST_WAIT_STAR = 1;
-const unsigned char ST_ENTER_PIN = 2;
-const unsigned char ST_WAIT_HASH = 3;
-const unsigned char ST_ENTER_OTP = 4;
-const unsigned char ST_FAIL      = 5;
-const unsigned char ST_OPEN      = 6;
+// 1. DEFINIZIONE COSTANTI E STATI DEGLI AUTOMI (LIVELLO MV0)
 
-// [VOLATILE]
-volatile unsigned char current_sys_state = 0; 
-volatile unsigned char display_buffer[6] = {11, 11, 11, 11, 11, 11}; 
-volatile unsigned char pir_triggered_flag = 0; 
+#define KEY_STAR        10
+#define KEY_HASH        11
+#define KEY_NONE        0xFF
 
-// [DATI SENSIBILI E BUFFER]
-const unsigned char CORRECT_PIN[6] = {1, 2, 3, 4, 5, 6}; 
-char generated_otp[6]; 
-unsigned char buffer_pos = 0; 
-unsigned char otp_seconds_left = 0; 
+#define SEG_DASH        10
+#define SEG_BLANK       11
 
-// [ENTROPIA E TASTIERA]
-volatile unsigned int fast_entropy_counter = 0xACE1; 
-char last_pressed_key = 0; 
+#define DEBOUNCE_MS     16     // 16 ms di stabilizzazione antirimbalzo
 
-const char CHAR_MAP[4][3] = {{'1','2','3'}, {'4','5','6'}, {'7','8','9'}, {'*','0','#'}};
-static unsigned char key_state = 0;
-static unsigned char last_coord = 0xFF;
-static unsigned char current_coord = 0xFF;
-static unsigned int debounce_timer = 0;
+#define OTP_TIMEOUT_S   10     // 10 secondi di validita OTP
 
-// Mappatura: 0bGFEDCBAx 
-const unsigned char SEV_SEG_MAP[12] = {
-    0b00111111, // 0 
-    0b00000110, // 1 
-    0b01011011, // 2 
-    0b01001111, // 3 
-    0b01100110, // 4 
-    0b01101101, // 5 
-    0b01111101, // 6 
-    0b00000111, // 7 
-    0b01111111, // 8 
-    0b01101111, // 9 
-    0b01000000, // 10: Trattino '-'
-    0b00000000  // 11: Vuoto
+typedef enum {
+    ST_STANDBY   = 0,
+    ST_WAIT_STAR = 1,
+    ST_ENTER_PIN = 2,
+    ST_WAIT_HASH = 3,
+    ST_ENTER_OTP = 4,
+    ST_FAIL      = 5,
+    ST_OPEN      = 6
+} SysState;
+
+typedef enum {
+    KP_IDLE      = 0,
+    KP_VER_PRESS = 1,
+    KP_WAIT_REL  = 2,
+    KP_VER_REL   = 3
+} KpState;
+
+// 2. STRUTTURE DATI GLOBALI E REGISTRI CONDIVISI TRA AUTOMI
+
+typedef struct {
+    uint8_t tick;      // Flag cadenza 1 ms per scansione foreground (1 bit)
+    uint8_t timer_en;  // Abilitazione countdown OTP (1 bit)
+    uint8_t expired;   // Flag scadenza 10 secondi (1 bit)
+    uint8_t sec_left;  // Secondi residui (4 bit effettivi: 0..10)
+} Clock;
+
+typedef struct {
+    uint8_t buf[6];    // Vettore visivo (6 x 4 bit: 0..11)
+    uint8_t digit;     // Indice cifra attiva multiplexing (3 bit: 0..5)
+} Display;
+
+typedef struct {
+    KpState state;     // Stato FSM antirimbalzo (2 bit)
+    uint8_t raw;       // Coordinata grezza 3*r + c (4 bit)
+    uint8_t stable;    // Coordinata in verifica (4 bit)
+    uint8_t ms_cnt;    // Contatore campioni stabili (5 bit: 0..16)
+    uint8_t key;       // Tasto validato a 4 bit (0..11, 0xFF=nullo)
+} Keypad;
+
+typedef struct {
+    SysState state;    // Stato FSM centrale (3 bit)
+    uint8_t  pir_flag; // Flag fronte di salita sensore PIR (1 bit)
+    uint8_t  idx;      // Indice cifra in inserimento (3 bit: 0..6)
+    uint8_t  code_ok;  // Accumulatore booleano verifica in serie (1 bit)
+    uint8_t  last_key; // Memoria tasto precedente per reset *# (4 bit)
+    uint8_t  otp[6];   // Cifre OTP in binario puro (6 x 4 bit: 0..9)
+    uint16_t seed;     // Contatore entropia a 16 bit per Xorshift
+} System;
+
+volatile static Clock   clk  = {0, 0, 0, 0};
+volatile static Display disp = {{SEG_BLANK, SEG_BLANK, SEG_BLANK, SEG_BLANK, SEG_BLANK, SEG_BLANK}, 0};
+volatile static Keypad  kp   = {KP_IDLE, KEY_NONE, KEY_NONE, 0, KEY_NONE};
+volatile static System  sys  = {ST_STANDBY, 0, 0, 1, KEY_NONE, {0, 0, 0, 0, 0, 0}, 0xACE1};
+
+// Costanti cablate e tabelle di decodifica
+static const uint8_t SECRET_PIN[6] = {1, 2, 3, 4, 5, 6};
+
+static const uint8_t SEG_MAP[12] = {
+    0b00111111, // 0
+    0b00000110, // 1
+    0b01011011, // 2
+    0b01001111, // 3
+    0b01100110, // 4
+    0b01101101, // 5
+    0b01111101, // 6
+    0b00000111, // 7
+    0b01111111, // 8
+    0b01101111, // 9
+    0b01000000, // 10: -
+    0b00000000  // 11: spento
 };
 
-// ==============================================================================
-// 2. HARDWARE ABSTRACTION LAYER: BARE METAL DRIVERS
-// ==============================================================================
+static const uint8_t KEY_MAP[12] = {
+    1, 2, 3,
+    4, 5, 6,
+    7, 8, 9,
+    KEY_STAR, 0, KEY_HASH
+};
+ 
+// 3. PRIMITIVE HARDWARE 
 
-void uart_init() {
-    UBRR0H = 0; 
-    UBRR0L = 103; // 9600 bps a 16MHz
-    UCSR0B = (1 << TXEN0); 
-    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); 
-}
-
-void uart_tx(char c) {
-    while (!(UCSR0A & (1 << UDRE0))); 
-    UDR0 = c; 
-}
-
-void uart_print(const char* str) {
-    while (*str) uart_tx(*str++);
-    uart_tx('\r'); uart_tx('\n'); 
-}
-
-void generate_and_print_otp() {
-    unsigned int state = fast_entropy_counter; 
-    for(int i = 0; i < 6; i++) {
-        state ^= state << 7; state ^= state >> 9; state ^= state << 8;
-        unsigned char digit = state & 0x0F; 
-        if (digit > 9) digit -= 6; 
-        generated_otp[i] = digit + '0'; 
+static inline void setDisp(uint8_t val) {
+    for (uint8_t i = 0; i < 6; i++) {
+        disp.buf[i] = val;
     }
-    for(int i=0; i<6; i++) uart_tx(generated_otp[i]); 
-    uart_tx('\r'); uart_tx('\n');
 }
 
-void start_otp_timer() {
-    otp_seconds_left = 10; 
-    TCCR1A = 0; 
-    TCCR1B = (1 << WGM12) | (1 << CS12) | (1 << CS10); // CTC, Prescaler 1024
-    OCR1A = 15624; // 1.0 secondi
-    TIFR1 = (1 << OCF1A); 
+// Invio seriale e impulso di Latch 
+static inline void srSend(uint8_t val) {
+    for (uint8_t i = 0; i < 8; i++) {
+        if ((val & 0x80) != 0) {
+            PORTD |= (1 << 4);  // D4 (DS) HIGH (Istruzione SBI)
+        } else {
+            PORTD &= ~(1 << 4); // D4 (DS) LOW  (Istruzione CBI)
+        }
+        PORTD |= (1 << 5);      // D5 (SHCP Clock) HIGH
+        PORTD &= ~(1 << 5);     // D5 (SHCP Clock) LOW
+        val <<= 1;              // Scorri al bit successivo
+    }
+    PORTD |= (1 << 6);          // D6 (STCP Latch) HIGH
+    PORTD &= ~(1 << 6);         // D6 (STCP Latch) LOW
 }
 
-void set_display_dash() { for(int i=0; i<6; i++) display_buffer[i] = 10; } 
-void set_display_fail() { for(int i=0; i<6; i++) display_buffer[i] = 0; }  
-void set_display_open() { for(int i=0; i<6; i++) display_buffer[i] = 1; }  
-void set_display_blank() { for(int i=0; i<6; i++) display_buffer[i] = 11; } 
-
-// ==============================================================================
-// 3. BACKGROUND: ISR BARE METAL (VIEW E SENSORI)
-// ==============================================================================
-
-void send_serial_byte(unsigned char val) {
-    asm volatile (
-        "ldi r25, 8 \n\t"
-        "lwhile%=:\n\t"
-        "sbrc %0, 7 \n\t" "sbi 0x0B, 4 \n\t" // D4 (Data) HIGH
-        "sbrs %0, 7 \n\t" "cbi 0x0B, 4 \n\t" // D4 (Data) LOW
-        "nop \n\t nop \n\t nop \n\t nop \n\t"
-        "sbi 0x0B, 5 \n\t"                   // D5 (Clock) HIGH
-        "nop \n\t nop \n\t" 
-        "cbi 0x0B, 5 \n\t"                   // D5 (Clock) LOW
-        "nop \n\t nop \n\t" 
-        "add %0, %0 \n\t"                    // Shift
-        "subi r25, 1 \n\t"
-        "brne lwhile%= \n\t"
-        : "+r" (val) : : "r25"   
-    );
+static inline void uartTx(uint8_t b) {
+    while ((UCSR0A & (1 << UDRE0)) == 0);
+    UDR0 = b;
 }
+
+static inline void makeOtp(void) {
+    uint16_t s = sys.seed;
+    if (s == 0) {
+        s = 0xACE1;
+    }
+    for (uint8_t i = 0; i < 6; i++) {
+        s ^= (s << 7);
+        s ^= (s >> 9);
+        s ^= (s << 8);
+        uint8_t d = (uint8_t)(s & 0x0F);
+        if (d > 9) {
+            d -= 6;
+        }
+        sys.otp[i] = d;
+        uartTx(d + 48); // Conversione ASCII ('0' = 48)
+    }
+    uartTx(13); // CR
+    uartTx(10); // LF
+}
+
+static inline uint8_t scanKeys(void) {
+    for (uint8_t r = 0; r < 4; r++) {
+        PORTC |= 0x0F;                  // Righe PC0..PC3 HIGH
+        PORTC &= ~(1 << r);             // Riga r-esima LOW
+        asm volatile("nop\n\tnop\n\t"); // Assestamento linee (125 ns)
+
+        if ((PINC & (1 << PINC4)) == 0) return (uint8_t)(r * 3 + 0);
+        if ((PINC & (1 << PINC5)) == 0) return (uint8_t)(r * 3 + 1);
+        if ((PIND & (1 << PIND3)) == 0) return (uint8_t)(r * 3 + 2);
+    }
+    PORTC |= 0x0F;
+    return KEY_NONE;
+}
+
+// 4. INIZIALIZZAZIONE HARDWARE PERIFERICHE 
+
+static inline void initIO(void) {
+    DDRD |= (1 << DDD4) | (1 << DDD5) | (1 << DDD6); // D4, D5, D6 Output (74HC595)
+    DDRB |= 0x3F;                                    // PB0..PB5 Output (Anodi)
+
+    DDRC  |= 0x0F;                                   // Righe PC0..PC3 Output
+    PORTC |= 0x0F;
+
+    DDRC  &= ~((1 << DDC4) | (1 << DDC5));           // Colonne PC4, PC5 Input Pull-Up
+    PORTC |= (1 << PORTC4) | (1 << PORTC5);
+    DDRD  &= ~((1 << DDD3) | (1 << DDD2));           // Colonna PD3 e PIR PD2 Input Pull-Up
+    PORTD |= (1 << PORTD3) | (1 << PORTD2);
+}
+
+static inline void initUART(void) {
+    UBRR0H = 0;
+    UBRR0L = 103; // 9600 baud @ 16 MHz
+    UCSR0B = (1 << TXEN0);
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+}
+
+static inline void initBaseTempi(void) {
+    TCCR2A = (1 << WGM21);  // Modalita CTC
+    TCCR2B = (1 << CS22);   // Prescaler 64
+    OCR2A  = 249;           // Periodo 1 ms (1000 Hz)
+    TIMSK2 = (1 << OCIE2A); // Abilita interrupt Compare Match A
+}
+
+static inline void initPIR(void) {
+    EICRA = (1 << ISC01) | (1 << ISC00); // Fronte di salita su INT0 (PD2)
+    EIMSK = (1 << INT0);
+}
+
+// 5. GESTORI DI INTERRUZIONE (ISR BACKGROUND: PIR, CLOCK E MULTIPLEXING)
 
 ISR(INT0_vect) {
-    if (current_sys_state == ST_STANDBY) {
-        current_sys_state = ST_WAIT_STAR;
-        set_display_dash();
-        pir_triggered_flag = 1; 
-    }
+    sys.pir_flag = 1;
 }
 
 ISR(TIMER2_COMPA_vect) {
-    if (current_sys_state == ST_STANDBY) {
-        PORTB &= ~0x3F; 
+    static uint16_t ms_acc = 0; // Accumulatore locale per base tempi 1 secondo
+
+    // 1. Segnale di sincronismo a 1 ms per gli automi in foreground
+    clk.tick = 1;
+
+    // 2. Prescaler a 1 secondo e countdown OTP (a 8 bit atomico)
+    if (clk.timer_en != 0) {
+        ms_acc++;
+        if (ms_acc >= 1000) {
+            ms_acc = 0;
+            if (clk.sec_left > 0) {
+                clk.sec_left--;
+                if (clk.sec_left == 0) {
+                    clk.timer_en = 0;
+                    clk.expired  = 1;
+                }
+            }
+        }
+    } else {
+        ms_acc = 0; // Mantiene allineata la fase del primo secondo
+    }
+
+    // 3. Multiplexing Display a 7 Segmenti (1 cifra ogni 1 ms)
+    PORTB &= ~0x3F; // Spegne tutti gli anodi PB0..PB5
+    if (sys.state == ST_STANDBY) {
         return;
     }
-    static unsigned char current_digit = 0;
-    
-    PORTB &= ~0x3F; // Spegne transistor
-    unsigned char mask = ~SEV_SEG_MAP[display_buffer[current_digit]]; // Anodo comune
-    send_serial_byte(mask); 
-    
-    PORTD |= (1 << 6);  // D6 (Latch) HIGH
-    PORTD &= ~(1 << 6); // D6 (Latch) LOW
-    
-    PORTB |= (1 << current_digit); // Riaccende l'alimentazione cifra corrente
-    
-    current_digit++;
-    if (current_digit >= 6) current_digit = 0;
-}
 
-// ==============================================================================
-// 4. FOREGROUND: CONTROLLER LOGICO E FSM TASTIERA
-// ==============================================================================
+    uint8_t d = disp.digit;
+    uint8_t mask = (uint8_t)(~SEG_MAP[disp.buf[d]]);
+    srSend(mask);
+    PORTB |= (1 << d); // Alimenta l'anodo della cifra corrente
 
-unsigned char check_arrays_match(const unsigned char* input, const void* target, unsigned char is_otp) {
-    for(int i = 0; i < 6; i++) {
-        unsigned char target_val = is_otp ? (((const char*)target)[i] - '0') : ((const unsigned char*)target)[i];
-        if (input[i] != target_val) return 0; 
+    d++;
+    if (d >= 6) {
+        d = 0;
     }
-    return 1; 
+    disp.digit = d;
 }
 
-void sys_st_standby(char key) { }
-void sys_st_wait_star(char key) {
-    if (key == '*') { current_sys_state = ST_ENTER_PIN; buffer_pos = 0; set_display_dash(); }
-}
-void sys_st_enter_pin(char key) {
-    if (key >= '0' && key <= '9' && buffer_pos < 6) {
-        display_buffer[buffer_pos] = key - '0'; buffer_pos++;
-        if (buffer_pos == 6) { 
-            if (check_arrays_match((const unsigned char*)display_buffer, (const void*)CORRECT_PIN, 0)) {
-                current_sys_state = ST_WAIT_HASH; set_display_dash();
-                generate_and_print_otp(); start_otp_timer();
-            } else {
-                current_sys_state = ST_FAIL; set_display_fail();
+// 6. AUTOMA TASTIERA IN FOREGROUND (FSM ANTIRIMBALZO A 4 STATI)
+
+static inline void runKeypad(void) {
+    uint8_t c = scanKeys();
+    kp.raw = c;
+
+    switch (kp.state) {
+        case KP_IDLE:
+            if (c != KEY_NONE) {
+                kp.stable = c;
+                kp.ms_cnt = 0;
+                kp.state  = KP_VER_PRESS;
             }
-        }
-    }
-}
-void sys_st_wait_hash(char key) {
-    if (key == '#') { current_sys_state = ST_ENTER_OTP; buffer_pos = 0; set_display_dash(); }
-}
-void sys_st_enter_otp(char key) {
-    if (key >= '0' && key <= '9' && buffer_pos < 6) {
-        display_buffer[buffer_pos] = key - '0'; buffer_pos++;
-        if (buffer_pos == 6) { 
-            TCCR1B = 0; // Ferma il timer
-            if (check_arrays_match((const unsigned char*)display_buffer, (const void*)generated_otp, 1)) {
-                current_sys_state = ST_OPEN; set_display_open();
+            break;
+
+        case KP_VER_PRESS:
+            if (c == kp.stable) {
+                kp.ms_cnt++;
+                if (kp.ms_cnt >= DEBOUNCE_MS) {
+                    kp.key   = KEY_MAP[c];
+                    kp.state = KP_WAIT_REL;
+                }
             } else {
-                current_sys_state = ST_FAIL; set_display_fail();
+                kp.state = KP_IDLE;
             }
-        }
-    }
-} 
-void sys_st_fail(char key) { }
-void sys_st_open(char key) { }
+            break;
 
-void (*const system_fsm_table[7])(char) = {
-    sys_st_standby, sys_st_wait_star, sys_st_enter_pin, 
-    sys_st_wait_hash, sys_st_enter_otp, sys_st_fail, sys_st_open
-};
+        case KP_WAIT_REL:
+            if (c == KEY_NONE) {
+                kp.ms_cnt = 0;
+                kp.state  = KP_VER_REL;
+            }
+            break;
 
-void process_valid_key(char key) {
-    if (last_pressed_key == '*' && key == '#') {
-        if (current_sys_state != ST_FAIL && current_sys_state != ST_OPEN) {
-            current_sys_state = ST_STANDBY;
-            set_display_blank();
-            pir_triggered_flag = 0; 
-            last_pressed_key = key; return;
-        }
-    }
-    last_pressed_key = key;
-    system_fsm_table[current_sys_state](key);
-}
-
-unsigned char get_raw_key_coord() {
-    for (unsigned char r = 0; r < 4; r++) {
-        PORTC |= 0x0F; PORTC &= ~(1 << r); 
-        asm volatile("nop\n\tnop\n\tnop\n\tnop\n\t"); 
-        
-        if (!(PINC & (1 << 4))) return (r << 4) | 0; 
-        if (!(PINC & (1 << 5))) return (r << 4) | 1; 
-        if (!(PIND & (1 << 3))) return (r << 4) | 2; 
-    }
-    return 0xFF; 
-}
-
-void fsm_idle() { if (current_coord != 0xFF) { last_coord = current_coord; debounce_timer = 0; key_state = 1; } }
-void fsm_verify_press() {
-    debounce_timer++;
-    if (debounce_timer > 15) {
-        if (current_coord == last_coord) {
-            unsigned char r = current_coord >> 4;
-            process_valid_key(CHAR_MAP[r][current_coord & 0x0F]); key_state = 2; 
-        } else key_state = 0; 
-    }
-}
-void fsm_wait_release() { if (current_coord == 0xFF) { debounce_timer = 0; key_state = 3; } }
-void fsm_verify_release() {
-    debounce_timer++;
-    if (debounce_timer > 15) { if (current_coord == 0xFF) key_state = 0; else key_state = 2; }
-}
-
-void (*const keypad_fsm_table[4])(void) = { 
-  fsm_idle, fsm_verify_press, fsm_wait_release, fsm_verify_release 
-};
-
-// ==============================================================================
-// 5. LOOP DISPATCHER E TIMEOUT
-// ==============================================================================
-
-void loop_task_standby() {
-    if (pir_triggered_flag) {
-        pir_triggered_flag = 0; 
+        case KP_VER_REL:
+            if (c == KEY_NONE) {
+                kp.ms_cnt++;
+                if (kp.ms_cnt >= DEBOUNCE_MS) {
+                    kp.state = KP_IDLE;
+                }
+            } else {
+                kp.state = KP_WAIT_REL;
+            }
+            break;
     }
 }
 
-void loop_task_active_standard() {
-    current_coord = get_raw_key_coord();
-    keypad_fsm_table[key_state](); 
-}
+// 7. AUTOMA CONTROLLO ACCESSI 
 
-void loop_task_active_timer() {
-    if (TIFR1 & (1 << OCF1A)) {
-        TIFR1 = (1 << OCF1A); 
-        otp_seconds_left--; 
-        if (otp_seconds_left == 0) { 
-            TCCR1B = 0; 
-            current_sys_state = ST_FAIL;
-            set_display_fail();
+static inline void runSystem(void) {
+    // 1. Guardia prioritaria: Scadenza timeout 10s
+    if (clk.expired != 0) {
+        clk.expired = 0;
+        if (sys.state == ST_WAIT_HASH || sys.state == ST_ENTER_OTP) {
+            setDisp(0);
+            sys.state = ST_FAIL;
             return;
         }
     }
-    loop_task_active_standard();
+
+    // 2. Guardia di risveglio: Stato Standby ed evento PIR
+    if (sys.state == ST_STANDBY) {
+        if (sys.pir_flag != 0) {
+            sys.pir_flag = 0;
+            sys.last_key = KEY_NONE;
+            setDisp(SEG_DASH);
+            sys.state    = ST_WAIT_STAR;
+        }
+        kp.key = KEY_NONE;
+        return;
+    }
+    sys.pir_flag = 0;
+
+    // 3. Prelievo tasto validato dall'Automa Tastiera
+    uint8_t k = kp.key;
+    if (k == KEY_NONE) return;
+    kp.key = KEY_NONE;
+
+    // 4. Riconoscitore sequenza prioritaria di reset "*#"
+    if (sys.state != ST_FAIL && sys.state != ST_OPEN) {
+        if (sys.last_key == KEY_STAR && k == KEY_HASH) {
+            clk.timer_en = 0; // Scrittura atomica a 8 bit
+            clk.expired  = 0;
+            sys.last_key = KEY_NONE;
+            setDisp(SEG_BLANK);
+            sys.state    = ST_STANDBY;
+            return;
+        }
+        sys.last_key = k;
+    }
+
+    // 5. Evoluzione Macchina a Stati Finiti Centrale
+    switch (sys.state) {
+        case ST_WAIT_STAR:
+            if (k == KEY_STAR) {
+                sys.idx     = 0;
+                sys.code_ok = 1;
+                setDisp(SEG_DASH);
+                sys.state   = ST_ENTER_PIN;
+            }
+            break;
+
+        case ST_ENTER_PIN:
+            if (k <= 9) {
+                uint8_t i = sys.idx;
+                disp.buf[i] = k;
+                if (k != SECRET_PIN[i]) {
+                    sys.code_ok = 0;
+                }
+                i++;
+                sys.idx = i;
+
+                if (i == 6) {
+                    if (sys.code_ok != 0) {
+                        setDisp(SEG_DASH);
+                        makeOtp();
+                        // Avvio atomico a 8 bit del timer da 10 secondi
+                        clk.sec_left = OTP_TIMEOUT_S;
+                        clk.expired  = 0;
+                        clk.timer_en = 1;
+                        sys.state    = ST_WAIT_HASH;
+                    } else {
+                        setDisp(0);
+                        sys.state = ST_FAIL;
+                    }
+                }
+            }
+            break;
+
+        case ST_WAIT_HASH:
+            if (k == KEY_HASH) {
+                sys.idx     = 0;
+                sys.code_ok = 1;
+                setDisp(SEG_DASH);
+                sys.state   = ST_ENTER_OTP;
+            }
+            break;
+
+        case ST_ENTER_OTP:
+            if (k <= 9) {
+                uint8_t i = sys.idx;
+                disp.buf[i] = k;
+                if (k != sys.otp[i]) {
+                    sys.code_ok = 0;
+                }
+                i++;
+                sys.idx = i;
+
+                if (i == 6) {
+                    clk.timer_en = 0; // Arresto atomico a 8 bit
+
+                    if (sys.code_ok != 0) {
+                        setDisp(1);
+                        sys.state = ST_OPEN;
+                    } else {
+                        setDisp(0);
+                        sys.state = ST_FAIL;
+                    }
+                }
+            }
+            break;
+
+        default:
+            break;
+    }
 }
 
-void (*const loop_task_table[7])(void) = {
-    loop_task_standby, loop_task_active_standard, loop_task_active_standard, 
-    loop_task_active_timer, loop_task_active_timer, loop_task_active_standard, loop_task_active_standard
-};
-
-
-// ==============================================================================
-// 6. SETUP E MAIN
-// ==============================================================================
-
-void sys_setup() {
-    DDRD |= 0x70; // Pin D4, D5, D6 Output
-    DDRB |= 0x3F; // Pin B0-B5 Output
-    DDRC |= 0x0F; PORTC |= 0x0F; // Righe tastiera
-    
-    // Pull-ups colonne tastiera
-    DDRC &= ~0x30; PORTC |= 0x30; DDRD &= ~(1 << 3); PORTD |= (1 << 3); 
-    // Pull-up PIR
-    DDRD &= ~(1 << 2); PORTD |= (1 << 2);
-
-    uart_init();
-
-    // Timer2
-    TCCR2A = (1 << WGM21); TCCR2B = (1 << CS22); OCR2A  = 249;  TIMSK2 = (1 << OCIE2A); 
-  
-    // Interruzione esterna
-    EICRA = (1 << ISC01) | (1 << ISC00);  
-    EIMSK = (1 << INT0);  
-  
-    // Global Interrupts
-    SREG |= (1 << 7); 
-}
+// 8. FUNZIONE MAIN 
 
 int main(void) {
-    sys_setup();
-    
+    initIO();
+    initUART();
+    initBaseTempi();
+    initPIR();
+
+    // Abilitazione globale delle interruzioni (Bit 7 del registro SREG)
+    SREG |= (1 << 7);
+
     while (1) {
-        fast_entropy_counter++; 
-        loop_task_table[current_sys_state](); 
+        // Incremento incondizionato del contatore di entropia a 16 bit
+        sys.seed++;
+
+        // Scansione deterministica degli automi cadenzata dal tick di 1 ms
+        if (clk.tick != 0) {
+            clk.tick = 0;
+            runKeypad();
+            runSystem();
+        }
     }
-    
     return 0;
 }
